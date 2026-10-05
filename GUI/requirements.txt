@@ -1,0 +1,3 @@
+# No third-party dependencies — stdlib only (tkinter, subprocess, json).
+# Tested with: /usr/bin/python3 (macOS system Python 3.9, Tk 8.5).
+# Homebrew Python 3.12 on this machine lacks _tkinter; use system Python.
