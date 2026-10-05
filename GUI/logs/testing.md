@@ -91,3 +91,40 @@ block; single `busy` slot).
   output (not mocks).
 - Live start/stop against a running daemon: NOT performed (documented gap).
 - Repo contamination: NONE (`GUI/` only).
+
+## 8. Bug fix — running containers not shown (2026-10-05, daemon `running`)
+
+Symptom: with `container run -it ubuntu:latest /bin/bash` active, the GUI
+showed no containers.
+
+Root causes (both confirmed with live evidence, not guesses):
+
+1. **Startup deadlock + dropped refreshes (`src/app.py`).** `refresh_all`
+   fired three separate silent refreshes; the first set the busy flag, the
+   other two saw `silent and busy` and returned without doing anything —
+   and the silent system apply never cleared busy. Dashboard never loaded
+   and every button answered "Another operation is in progress".
+   Fix: single combined `refresh_all` job (system→containers→images in one
+   worker, one apply, always idles); per-tab refreshes simplified to the
+   normal submit path. Also fixed Treeview `iid` collision fallback.
+2. **Real JSON schema is nested (`src/models.py`).** Live
+   `list --all --format json` returns
+   `{id, configuration: {image: {reference}, platform: {...}},
+   status: {state, networks}}` and images return
+   `{configuration: {name}, variants: [{digest, platform, size}]}` — the
+   flat-key parser produced blank image/state rows. Fix: nested extraction
+   with flat-key fallbacks, `registry/name:tag` splitting, byte-size
+   formatting. New `TestRealSchema` fixtures use verbatim live shapes.
+
+Verification (all actually run):
+
+- New regression tests failed before the fix (3 failures) and pass after:
+  `15/15 OK` on both interpreters.
+- Live service layer vs running daemon: `START → state 'running',
+  is_running True, image docker.io/library/ubuntu:latest`; `STOP →
+  'stopped'`. Container left stopped, as found.
+  (`python3 -c` via `ContainerService`, no display needed.)
+- `py_compile` OK; `src.app` imports OK; no stale `silent` call sites.
+- Headless SSH has no window server, so the Tk widget path itself was NOT
+  click-tested here — demo on a graphical Mac:
+  `container system start && cd GUI && /usr/bin/python3 Usage.py`.

@@ -234,11 +234,75 @@ class App:
 
     # -- refresh -------------------------------------------------------
     def refresh_all(self):
-        self.refresh_system(silent=True)
-        self.refresh_containers(silent=True)
-        self.refresh_images(silent=True)
+        """Startup refresh: system + containers + images in ONE worker.
 
-    def refresh_containers(self, silent: bool = False):
+        A single job can never be dropped by the busy-guard, and its apply
+        step always clears the busy flag — previously three separate silent
+        refreshes raced the guard and the dashboard never loaded.
+        """
+        def work():
+            data: dict = {}
+            try:
+                data["status"] = self.service.system_status()
+            except ContainerCLIError as e:
+                data["status_err"] = str(e)
+            try:
+                data["version"] = self.service.system_version()
+            except ContainerCLIError:
+                data["version"] = "(version unavailable)"
+            try:
+                data["containers"] = self.service.list_containers()
+                data["c_table"] = self.service.run_raw(["list", "--all"])
+            except ContainerCLIError as e:
+                data["containers_err"] = str(e)
+            try:
+                data["images"] = self.service.list_images()
+                data["i_table"] = self.service.run_raw(["image", "list"])
+            except ContainerCLIError as e:
+                data["images_err"] = str(e)
+
+            def apply(data=data):
+                errs = []
+                st = data.get("status")
+                if st is not None:
+                    self.sys_var.set(f"System: {st.status}")
+                    self.sys_detail.set(f"Status: {st.status}")
+                else:
+                    self.sys_var.set("System: unknown")
+                    self.sys_detail.set("Status: unknown")
+                    errs.append(data.get("status_err", "system status failed"))
+                self.version_text.configure(state=tk.NORMAL)
+                self.version_text.delete("1.0", tk.END)
+                self.version_text.insert(tk.END, data.get("version", ""))
+                self.version_text.configure(state=tk.DISABLED)
+                if "containers" in data:
+                    self.containers = data["containers"]
+                    self._render_containers()
+                    tbl = data.get("c_table")
+                    if tbl is not None:
+                        self._log_result("list --all", tbl.stdout, tbl.stderr)
+                else:
+                    errs.append(data.get("containers_err",
+                                        "container list failed"))
+                if "images" in data:
+                    self.images = data["images"]
+                    self._render_images()
+                    tbl = data.get("i_table")
+                    if tbl is not None:
+                        self._log_result("image list", tbl.stdout, tbl.stderr)
+                else:
+                    errs.append(data.get("images_err", "image list failed"))
+                for e in errs:
+                    self._log(f"ERROR: {e}")
+                if errs:
+                    self._set_idle("Ready (some refreshes failed — see output)")
+                else:
+                    n, m = len(self.containers), len(self.images)
+                    self._set_idle(f"Ready — {n} container(s), {m} image(s)")
+            return apply
+        self._submit("Refreshing", work)
+
+    def refresh_containers(self):
         def work():
             items = self.service.list_containers()
             res = self.service.run_raw(["list", "--all"])
@@ -248,8 +312,6 @@ class App:
                 self._log_result("list --all", res.stdout, res.stderr)
                 self._set_idle(f"Ready — {len(items)} container(s)")
             return apply
-        if silent and self.busy:
-            return
         self._submit("Refreshing containers", work)
 
     def _render_containers(self):
@@ -262,38 +324,39 @@ class App:
             self.cempty.pack(pady=8)
         else:
             self.cempty.pack_forget()
-            for c in self.containers:
+            for i, c in enumerate(self.containers):
                 state = c.state or "unknown"
                 marker = "● " if c.is_running else "○ "
-                self.ctree.insert("", tk.END, iid=c.id or c.display_name,
+                self.ctree.insert("", tk.END,
+                                  iid=c.id or f"row-{i}",
                                   values=(c.display_name, c.image,
                                           marker + state, c.ip,
                                           f"{c.os}/{c.arch}".strip("/")))
 
-    def refresh_images(self, silent: bool = False):
+    def _render_images(self):
+        for row in self.itree.get_children():
+            self.itree.delete(row)
+        if not self.images:
+            self.itree.insert("", tk.END, values=(
+                "(no images)", "pull one with Images → Pull…", "", ""))
+        for im in self.images:
+            self.itree.insert("", tk.END, values=(
+                im.name, im.tag,
+                f"{im.os}/{im.arch}".strip("/"), im.size))
+
+    def refresh_images(self):
         def work():
             items = self.service.list_images()
             res = self.service.run_raw(["image", "list"])
             def apply(items=items, res=res):
                 self.images = items
-                for row in self.itree.get_children():
-                    self.itree.delete(row)
-                if not items:
-                    self.itree.insert("", tk.END, values=(
-                        "(no images)",
-                        "pull one with Images → Pull…", "", ""))
-                for im in items:
-                    self.itree.insert("", tk.END, values=(
-                        im.name, im.tag,
-                        f"{im.os}/{im.arch}".strip("/"), im.size))
+                self._render_images()
                 self._log_result("image list", res.stdout, res.stderr)
                 self._set_idle(f"Ready — {len(items)} image(s)")
             return apply
-        if silent and self.busy:
-            return
         self._submit("Refreshing images", work)
 
-    def refresh_system(self, silent: bool = False):
+    def refresh_system(self):
         def work():
             st = self.service.system_status()
             ver = ""
@@ -309,20 +372,9 @@ class App:
                 self.version_text.insert(tk.END, ver)
                 self.version_text.configure(state=tk.DISABLED)
                 self._log(f"$ container system status\n{st.status}")
-                if not silent:
-                    self._set_idle(f"System: {st.status}")
+                self._set_idle(f"System: {st.status}")
             return apply
-        if silent and self.busy:
-            return
-        # System refresh during startup should not fight other refreshes.
-        if self.busy and not silent:
-            return
-        was_busy = self.busy
-        if not was_busy:
-            self._submit("Checking system status", work)
-        else:
-            # Already busy (refresh_all chains); run inline after pump.
-            self.jobs.put(lambda: None)
+        self._submit("Checking system status", work)
 
     # -- selection helpers ---------------------------------------------
     def _selected_container_id(self) -> Optional[str]:

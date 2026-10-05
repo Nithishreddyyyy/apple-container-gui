@@ -114,5 +114,71 @@ class TestLiveProbe(unittest.TestCase):
             self.assertIn("system", str(e).lower())
 
 
+class TestRealSchema(unittest.TestCase):
+    """Regression tests using the REAL CLI JSON shapes (container 1.2.1).
+
+    Fixtures captured from a live daemon:
+      `container list --all --format json`
+      `container image list --format json`
+    Top-level objects nest data under `configuration` / `status` /
+    `variants` — flat-key parsing yields blank rows.
+    """
+
+    REAL_CONTAINER = {
+        "configuration": {
+            "creationDate": "2026-10-05T05:57:33Z",
+            "id": "6b60e808-f78f-4fc1-8703-87df0b4f9381",
+            "image": {"reference": "docker.io/library/ubuntu:latest"},
+            "platform": {"architecture": "arm64", "os": "linux"},
+        },
+        "id": "6b60e808-f78f-4fc1-8703-87df0b4f9381",
+        "status": {"networks": [], "state": "stopped"},
+    }
+
+    REAL_CONTAINER_RUNNING = {
+        "configuration": {
+            "creationDate": "2026-10-05T05:57:33Z",
+            "id": "6b60e808-f78f-4fc1-8703-87df0b4f9381",
+            "image": {"reference": "docker.io/library/ubuntu:latest"},
+            "platform": {"architecture": "arm64", "os": "linux"},
+        },
+        "id": "6b60e808-f78f-4fc1-8703-87df0b4f9381",
+        "status": {"networks": [{"address": "192.168.64.2"}],
+                   "state": "running"},
+    }
+
+    REAL_IMAGE = {
+        "configuration": {"name": "docker.io/library/ubuntu:latest"},
+        "id": "f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7",
+        "variants": [{"digest": "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163",
+                      "platform": {"architecture": "arm64", "os": "linux"},
+                      "size": 40871017}],
+    }
+
+    def test_real_container_parses(self):
+        c = ContainerInfo.from_dict(self.REAL_CONTAINER)
+        self.assertEqual(c.id, "6b60e808-f78f-4fc1-8703-87df0b4f9381")
+        self.assertEqual(c.image, "docker.io/library/ubuntu:latest")
+        self.assertEqual(c.state, "stopped")
+        self.assertEqual(c.os, "linux")
+        self.assertEqual(c.arch, "arm64")
+        self.assertFalse(c.is_running)
+
+    def test_real_running_container_parses(self):
+        c = ContainerInfo.from_dict(self.REAL_CONTAINER_RUNNING)
+        self.assertTrue(c.is_running)
+        self.assertEqual(c.state, "running")
+        self.assertIn("192.168.64.2", c.ip)
+
+    def test_real_image_parses(self):
+        im = ImageInfo.from_dict(self.REAL_IMAGE)
+        self.assertEqual(im.name, "docker.io/library/ubuntu")
+        self.assertEqual(im.tag, "latest")
+        self.assertEqual(im.os, "linux")
+        self.assertEqual(im.arch, "arm64")
+        self.assertTrue(im.size and im.size != "0")
+        self.assertTrue(im.digest.startswith("sha256:"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
